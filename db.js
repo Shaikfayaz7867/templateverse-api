@@ -3,73 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 // Seed data
-const defaultVideos = [
-  {
-    "id": "vid_1",
-    "title": "Unstoppable John Wick Scene",
-    "videoUrl": "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
-    "thumbnailUrl": "https://images.unsplash.com/photo-1542751371-adc38448a05e?q=80&w=300&auto=format&fit=crop",
-    "username": "john_wick_fan",
-    "category": "Action",
-    "description": "High-intensity action shot. Movie scene templates.",
-    "tags": ["Action", "Cinematic", "John Wick", "Keanu Reeves"],
-    "uploadDate": "2026-07-01",
-    "likesCount": 2420,
-    "downloadsCount": 850
-  },
-  {
-    "id": "vid_2",
-    "title": "Cosmic Space Interstellar Template",
-    "videoUrl": "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
-    "thumbnailUrl": "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=300&auto=format&fit=crop",
-    "username": "sci_fi_geek",
-    "category": "Cinematic",
-    "description": "Epic cosmic sequence from deep interstellar space.",
-    "tags": ["Cinematic", "Interstellar", "Matthew McConaughey", "Space"],
-    "uploadDate": "2026-07-05",
-    "likesCount": 3590,
-    "downloadsCount": 1200
-  },
-  {
-    "id": "vid_3",
-    "title": "Iron Man I Am Iron Man",
-    "videoUrl": "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
-    "thumbnailUrl": "https://images.unsplash.com/photo-1608889174639-414d9f96b247?q=80&w=300&auto=format&fit=crop",
-    "username": "stark_industries",
-    "category": "Dialogue",
-    "description": "Classic Marvel snap dialogue and neon particle templates.",
-    "tags": ["Dialogue", "Iron Man", "Tony Stark", "Marvel"],
-    "uploadDate": "2026-07-06",
-    "likesCount": 4910,
-    "downloadsCount": 2100
-  },
-  {
-    "id": "vid_4",
-    "title": "Cyberpunk Neon Drive Beat",
-    "videoUrl": "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4",
-    "thumbnailUrl": "https://images.unsplash.com/photo-1515263487990-61b07816b324?q=80&w=300&auto=format&fit=crop",
-    "username": "driver_49",
-    "category": "Comedy",
-    "description": "Moody retro aesthetic synthwave template with stylish lighting.",
-    "tags": ["Comedy", "Drive", "Ryan Gosling", "Retro"],
-    "uploadDate": "2026-07-07",
-    "likesCount": 1500,
-    "downloadsCount": 430
-  },
-  {
-    "id": "vid_5",
-    "title": "Brad Pitt Fight Club Insane Twist",
-    "videoUrl": "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerMeltdowns.mp4",
-    "thumbnailUrl": "https://images.unsplash.com/photo-1533488765986-dfa2a9939acd?q=80&w=300&auto=format&fit=crop",
-    "username": "tyler_durden",
-    "category": "Cinematic",
-    "description": "The absolute best scene in cinematic history of mind twist.",
-    "tags": ["Cinematic", "Fight Club", "Brad Pitt", "Tyler Durden"],
-    "uploadDate": "2026-07-08",
-    "likesCount": 5120,
-    "downloadsCount": 3110
-  }
-];
+const defaultVideos = [];
 
 // In-memory fallback stores
 const memoryStore = {
@@ -157,6 +91,10 @@ async function initDb() {
     // Auto-migrate tables
     await pool.query(CREATE_TABLES_SQL);
     console.log("✅ PostgreSQL schema tables initialized successfully.");
+
+    // Delete any pre-existing dummy seed data if they exist in Postgres database
+    await pool.query("DELETE FROM videos WHERE id IN ('vid_1', 'vid_2', 'vid_3', 'vid_4', 'vid_5')");
+    console.log("🧹 Pre-existing dummy seed videos deleted from PostgreSQL database.");
 
     // Seed default videos if table is empty
     const checkVideos = await pool.query('SELECT COUNT(*) FROM videos');

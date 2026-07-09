@@ -36,8 +36,8 @@ let s3Client = null;
 let useR2 = false;
 
 if (
-  R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY &&
-  !R2_ACCOUNT_ID.includes("YOUR_") && !R2_ACCESS_KEY_ID.includes("YOUR_")
+  R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET_NAME &&
+  !R2_ACCOUNT_ID.includes("YOUR_") && !R2_ACCESS_KEY_ID.includes("YOUR_") && !R2_BUCKET_NAME.includes("YOUR_")
 ) {
   try {
     s3Client = new S3Client({
@@ -47,6 +47,7 @@ if (
         secretAccessKey: R2_SECRET_ACCESS_KEY,
       },
       region: 'auto',
+      forcePathStyle: true,
     });
     useR2 = true;
     console.log("☁️  Cloudflare R2 integration successfully initialized.");
@@ -271,11 +272,8 @@ app.post('/v1/videos/upload', upload.single('videoFile'), async (req, res) => {
         videoUrlPath = `r2://${key}`;
         console.log(`☁️  File uploaded to R2 successfully: ${videoUrlPath}`);
       } catch (err) {
-        console.error("❌ Cloudflare R2 upload error. Falling back to local disk storage:", err.message);
-        // Fallback local write
-        const filename = `${Date.now()}-${originalName}`;
-        fs.writeFileSync(path.join(UPLOADS_DIR, filename), req.file.buffer);
-        videoUrlPath = `/uploads/${filename}`;
+        console.error("❌ Cloudflare R2 upload error:", err.message);
+        return res.status(500).json({ success: false, message: "Cloudflare R2 upload failed: " + err.message, data: null });
       }
     } else {
       // Local fallback
