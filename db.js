@@ -1,0 +1,270 @@
+const { Pool } = require('pg');
+const fs = require('fs');
+const path = require('path');
+
+// Seed data
+const defaultVideos = [
+  {
+    "id": "vid_1",
+    "title": "Unstoppable John Wick Scene",
+    "videoUrl": "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+    "thumbnailUrl": "https://images.unsplash.com/photo-1542751371-adc38448a05e?q=80&w=300&auto=format&fit=crop",
+    "username": "john_wick_fan",
+    "category": "Action",
+    "description": "High-intensity action shot. Movie scene templates.",
+    "tags": ["Action", "Cinematic", "John Wick", "Keanu Reeves"],
+    "uploadDate": "2026-07-01",
+    "likesCount": 2420,
+    "downloadsCount": 850
+  },
+  {
+    "id": "vid_2",
+    "title": "Cosmic Space Interstellar Template",
+    "videoUrl": "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
+    "thumbnailUrl": "https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=300&auto=format&fit=crop",
+    "username": "sci_fi_geek",
+    "category": "Cinematic",
+    "description": "Epic cosmic sequence from deep interstellar space.",
+    "tags": ["Cinematic", "Interstellar", "Matthew McConaughey", "Space"],
+    "uploadDate": "2026-07-05",
+    "likesCount": 3590,
+    "downloadsCount": 1200
+  },
+  {
+    "id": "vid_3",
+    "title": "Iron Man I Am Iron Man",
+    "videoUrl": "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
+    "thumbnailUrl": "https://images.unsplash.com/photo-1608889174639-414d9f96b247?q=80&w=300&auto=format&fit=crop",
+    "username": "stark_industries",
+    "category": "Dialogue",
+    "description": "Classic Marvel snap dialogue and neon particle templates.",
+    "tags": ["Dialogue", "Iron Man", "Tony Stark", "Marvel"],
+    "uploadDate": "2026-07-06",
+    "likesCount": 4910,
+    "downloadsCount": 2100
+  },
+  {
+    "id": "vid_4",
+    "title": "Cyberpunk Neon Drive Beat",
+    "videoUrl": "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4",
+    "thumbnailUrl": "https://images.unsplash.com/photo-1515263487990-61b07816b324?q=80&w=300&auto=format&fit=crop",
+    "username": "driver_49",
+    "category": "Comedy",
+    "description": "Moody retro aesthetic synthwave template with stylish lighting.",
+    "tags": ["Comedy", "Drive", "Ryan Gosling", "Retro"],
+    "uploadDate": "2026-07-07",
+    "likesCount": 1500,
+    "downloadsCount": 430
+  },
+  {
+    "id": "vid_5",
+    "title": "Brad Pitt Fight Club Insane Twist",
+    "videoUrl": "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerMeltdowns.mp4",
+    "thumbnailUrl": "https://images.unsplash.com/photo-1533488765986-dfa2a9939acd?q=80&w=300&auto=format&fit=crop",
+    "username": "tyler_durden",
+    "category": "Cinematic",
+    "description": "The absolute best scene in cinematic history of mind twist.",
+    "tags": ["Cinematic", "Fight Club", "Brad Pitt", "Tyler Durden"],
+    "uploadDate": "2026-07-08",
+    "likesCount": 5120,
+    "downloadsCount": 3110
+  }
+];
+
+// In-memory fallback stores
+const memoryStore = {
+  users: [],
+  videos: [...defaultVideos],
+  requests: []
+};
+
+let pool = null;
+let usePostgres = false;
+
+const DATABASE_URL = process.env.DATABASE_URL;
+
+if (DATABASE_URL && !DATABASE_URL.includes("YOUR_") && !DATABASE_URL.includes("localhost")) {
+  // If a valid non-default Postgres connection string is provided, attempt connection
+  try {
+    pool = new Pool({
+      connectionString: DATABASE_URL,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+    });
+    usePostgres = true;
+  } catch (err) {
+    console.error("Failed to construct PostgreSQL Pool:", err.message);
+    usePostgres = false;
+  }
+} else {
+  // If using local/default URL, attempt it but support immediate fallback if local Postgres service isn't active
+  try {
+    pool = new Pool({
+      connectionString: DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/templateverse'
+    });
+    usePostgres = true;
+  } catch (err) {
+    usePostgres = false;
+  }
+}
+
+// SQL schema scripts
+const CREATE_TABLES_SQL = `
+  CREATE TABLE IF NOT EXISTS users (
+    username VARCHAR(100) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    avatar_url TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS videos (
+    id VARCHAR(100) PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    video_url TEXT NOT NULL,
+    thumbnail_url TEXT,
+    username VARCHAR(100) NOT NULL,
+    category VARCHAR(100) NOT NULL,
+    description TEXT,
+    tags TEXT[],
+    upload_date VARCHAR(20) NOT NULL,
+    likes_count INT DEFAULT 0,
+    downloads_count INT DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS requests (
+    id VARCHAR(100) PRIMARY KEY,
+    movie_name VARCHAR(255) NOT NULL,
+    actor_name VARCHAR(255) NOT NULL,
+    scene_name VARCHAR(255) NOT NULL,
+    dialogue TEXT NOT NULL,
+    description TEXT,
+    request_date VARCHAR(50) NOT NULL,
+    status VARCHAR(50) DEFAULT 'Pending'
+  );
+`;
+
+// Initialize database schema and seed data
+async function initDb() {
+  if (!usePostgres) {
+    console.log("⚠️  PostgreSQL is not configured or offline. Falling back to local in-memory storage.");
+    return;
+  }
+
+  try {
+    // Test database connection
+    await pool.query('SELECT NOW()');
+    
+    // Auto-migrate tables
+    await pool.query(CREATE_TABLES_SQL);
+    console.log("✅ PostgreSQL schema tables initialized successfully.");
+
+    // Seed default videos if table is empty
+    const checkVideos = await pool.query('SELECT COUNT(*) FROM videos');
+    if (parseInt(checkVideos.rows[0].count, 10) === 0) {
+      for (const v of defaultVideos) {
+        await pool.query(
+          `INSERT INTO videos (id, title, video_url, thumbnail_url, username, category, description, tags, upload_date, likes_count, downloads_count) 
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          [v.id, v.title, v.videoUrl, v.thumbnailUrl, v.username, v.category, v.description, v.tags, v.uploadDate, v.likesCount, v.downloadsCount]
+        );
+      }
+      console.log("🌱 Default videos successfully seeded to PostgreSQL.");
+    }
+  } catch (err) {
+    console.error("❌ PostgreSQL connection/migration failed:", err.message);
+    console.log("⚠️  Falling back to local in-memory storage for execution.");
+    usePostgres = false;
+  }
+}
+
+// Call init during startup
+initDb();
+
+module.exports = {
+  initDb,
+  
+  getUsers: async () => {
+    if (usePostgres) {
+      const res = await pool.query('SELECT * FROM users');
+      return res.rows.map(row => ({
+        username: row.username,
+        name: row.name,
+        email: row.email,
+        avatarUrl: row.avatar_url
+      }));
+    }
+    return memoryStore.users;
+  },
+
+  saveUser: async (user) => {
+    if (usePostgres) {
+      await pool.query(
+        'INSERT INTO users (username, name, email, avatar_url) VALUES ($1, $2, $3, $4) ON CONFLICT (username) DO NOTHING',
+        [user.username, user.name, user.email, user.avatarUrl]
+      );
+    } else {
+      memoryStore.users.push(user);
+    }
+  },
+
+  getVideos: async () => {
+    if (usePostgres) {
+      const res = await pool.query('SELECT * FROM videos');
+      return res.rows.map(row => ({
+        id: row.id,
+        title: row.title,
+        videoUrl: row.video_url,
+        thumbnailUrl: row.thumbnail_url,
+        username: row.username,
+        category: row.category,
+        description: row.description,
+        tags: row.tags || [],
+        uploadDate: row.upload_date,
+        likesCount: row.likes_count,
+        downloadsCount: row.downloads_count
+      }));
+    }
+    return memoryStore.videos;
+  },
+
+  saveVideo: async (video) => {
+    if (usePostgres) {
+      await pool.query(
+        `INSERT INTO videos (id, title, video_url, thumbnail_url, username, category, description, tags, upload_date, likes_count, downloads_count) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [video.id, video.title, video.videoUrl, video.thumbnailUrl, video.username, video.category, video.description, video.tags, video.uploadDate, video.likesCount, video.downloadsCount]
+      );
+    } else {
+      memoryStore.videos.unshift(video);
+    }
+  },
+
+  getRequests: async () => {
+    if (usePostgres) {
+      const res = await pool.query('SELECT * FROM requests ORDER BY request_date DESC');
+      return res.rows.map(row => ({
+        id: row.id,
+        movieName: row.movie_name,
+        actorName: row.actor_name,
+        sceneName: row.scene_name,
+        dialogue: row.dialogue,
+        description: row.description,
+        requestDate: row.request_date,
+        status: row.status
+      }));
+    }
+    return memoryStore.requests;
+  },
+
+  saveRequest: async (request) => {
+    if (usePostgres) {
+      await pool.query(
+        `INSERT INTO requests (id, movie_name, actor_name, scene_name, dialogue, description, request_date, status) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [request.id, request.movieName, request.actorName, request.sceneName, request.dialogue, request.description, request.requestDate, request.status]
+      );
+    } else {
+      memoryStore.requests.unshift(request);
+    }
+  }
+};

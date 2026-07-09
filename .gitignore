@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Environment configurations
+.env
+.env.local
+
+# Database backups & local data dumps
+data/*.json
+
+# User file uploads directory
+uploads/*
+!uploads/.gitkeep
