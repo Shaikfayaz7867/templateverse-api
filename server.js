@@ -4,7 +4,8 @@ const morgan = require('morgan');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 require('dotenv').config();
 
 const db = require('./db');
@@ -30,7 +31,6 @@ const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
 const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME;
-const R2_PUBLIC_URL_PREFIX = process.env.R2_PUBLIC_URL_PREFIX;
 
 let s3Client = null;
 let useR2 = false;
@@ -177,11 +177,34 @@ app.get('/v1/videos', async (req, res) => {
   const { category, filter, query } = req.query;
   let videos = await db.getVideos();
 
-  // Resolve dynamic asset URLs relative to current request's host/protocol
-  videos = videos.map(vid => ({
-    ...vid,
-    videoUrl: resolveUrl(vid.videoUrl, req),
-    thumbnailUrl: resolveUrl(vid.thumbnailUrl, req)
+  // Resolve dynamic asset URLs relative to current request's host/protocol and generate presigned URLs if needed
+  videos = await Promise.all(videos.map(async (vid) => {
+    let finalVideoUrl = vid.videoUrl;
+    if (finalVideoUrl && finalVideoUrl.startsWith('r2://')) {
+      if (useR2 && s3Client) {
+        try {
+          const key = finalVideoUrl.replace('r2://', '');
+          const command = new GetObjectCommand({
+            Bucket: R2_BUCKET_NAME,
+            Key: key
+          });
+          finalVideoUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+        } catch (err) {
+          console.error("Error generating presigned URL:", err.message);
+          finalVideoUrl = "";
+        }
+      } else {
+        finalVideoUrl = ""; // Fallback if R2 is not configured but URL is r2://
+      }
+    } else {
+      finalVideoUrl = resolveUrl(finalVideoUrl, req);
+    }
+    
+    return {
+      ...vid,
+      videoUrl: finalVideoUrl,
+      thumbnailUrl: resolveUrl(vid.thumbnailUrl, req)
+    };
   }));
 
   // Filter by category
@@ -244,9 +267,8 @@ app.post('/v1/videos/upload', upload.single('videoFile'), async (req, res) => {
         });
 
         await s3Client.send(uploadCommand);
-        // Prefix with public access url or custom domain
-        const prefix = R2_PUBLIC_URL_PREFIX.endsWith('/') ? R2_PUBLIC_URL_PREFIX.slice(0, -1) : R2_PUBLIC_URL_PREFIX;
-        videoUrlPath = `${prefix}/${key}`;
+        // Store as internal R2 URI to be presigned on read
+        videoUrlPath = `r2://${key}`;
         console.log(`☁️  File uploaded to R2 successfully: ${videoUrlPath}`);
       } catch (err) {
         console.error("❌ Cloudflare R2 upload error. Falling back to local disk storage:", err.message);
