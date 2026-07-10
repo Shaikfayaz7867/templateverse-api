@@ -141,9 +141,11 @@ app.post('/v1/auth/login', async (req, res) => {
 // Authentication: Register (Enforces unique username and hashes password)
 app.post('/v1/auth/register', async (req, res) => {
   const { username, name, email, password } = req.body;
-  if (!username || !name || !email || !password) {
+  if (!username || !name || !password) {
     return res.status(400).json({ success: false, message: "Missing required fields", data: null });
   }
+
+  const userEmail = email || "";
 
   const existingUser = await db.getUserByUsername(username);
   if (existingUser) {
@@ -156,7 +158,7 @@ app.post('/v1/auth/register', async (req, res) => {
   const user = {
     username: username,
     name: name,
-    email: email,
+    email: userEmail,
     passwordHash: passwordHash,
     avatarUrl: `https://api.dicebear.com/7.x/bottts/svg?seed=${username}`
   };
@@ -281,7 +283,7 @@ app.get('/v1/videos', async (req, res) => {
 
 // Upload Video Template (Saves file to Cloudflare R2 or falls back to local disk storage)
 app.post('/v1/videos/upload', upload.single('videoFile'), async (req, res) => {
-  const { title, description, category, tags } = req.body;
+  const { title, description, category, tags, requestId, username } = req.body;
 
   if (!title || !category) {
     return res.status(400).json({ success: false, message: "Title and Category are required fields", data: null });
@@ -329,7 +331,7 @@ app.post('/v1/videos/upload', upload.single('videoFile'), async (req, res) => {
     title: title,
     videoUrl: videoUrlPath,
     thumbnailUrl: randomThumb,
-    username: "guest_explorer",
+    username: username || "guest_explorer",
     category: category,
     description: description || "User uploaded short video template.",
     tags: parsedTags,
@@ -339,6 +341,10 @@ app.post('/v1/videos/upload', upload.single('videoFile'), async (req, res) => {
   };
 
   await db.saveVideo(newVideo);
+
+  if (requestId) {
+    await db.updateRequestStatus(requestId, 'Uploaded', newVideo.id);
+  }
 
   res.json({
     success: true,
@@ -353,9 +359,9 @@ app.post('/v1/videos/upload', upload.single('videoFile'), async (req, res) => {
 
 // Submit a new video creation request
 app.post('/v1/requests/create', async (req, res) => {
-  const { id, movieName, actorName, sceneName, dialogue, description, requestDate, status } = req.body;
+  const { id, requesterUsername, movieName, actorName, sceneName, dialogue, description, requestDate, status } = req.body;
 
-  if (!movieName || !actorName || !sceneName || !dialogue) {
+  if (!requesterUsername || !movieName || !actorName || !sceneName || !dialogue) {
     return res.status(400).json({ success: false, message: "Missing mandatory video request fields", data: null });
   }
 
@@ -372,13 +378,15 @@ app.post('/v1/requests/create', async (req, res) => {
 
   const newRequest = {
     id: id || `req_${Date.now()}`,
+    requesterUsername,
     movieName,
     actorName,
     sceneName,
     dialogue,
     description: description || "",
     requestDate: dateStr,
-    status: status || "Pending"
+    status: status || "Pending",
+    fulfilledVideoId: ""
   };
 
   await db.saveRequest(newRequest);
@@ -398,6 +406,46 @@ app.get('/v1/requests/history', async (req, res) => {
     message: "Fetched request history",
     data: requests
   });
+});
+
+// Confirm request is complete/fulfilled
+app.put('/v1/requests/:id/confirm', async (req, res) => {
+  const { id } = req.params;
+  await db.updateRequestStatus(id, 'Fulfilled', null);
+  res.json({
+    success: true,
+    message: "Request marked as fulfilled successfully"
+  });
+});
+
+// Modify user's username
+app.put('/v1/users/update-username', async (req, res) => {
+  const { oldUsername, newUsername } = req.body;
+  if (!oldUsername || !newUsername) {
+    return res.status(400).json({ success: false, message: "Old and new usernames are required" });
+  }
+  if (oldUsername.toLowerCase() === newUsername.toLowerCase()) {
+    return res.status(400).json({ success: false, message: "New username must be different from old username" });
+  }
+
+  // Check if username is already taken
+  const existingUser = await db.getUserByUsername(newUsername);
+  if (existingUser) {
+    return res.status(400).json({ success: false, message: "Username is already taken" });
+  }
+
+  try {
+    await db.updateUsername(oldUsername, newUsername);
+    res.json({
+      success: true,
+      message: "Username modified successfully"
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to modify username: " + err.message
+    });
+  }
 });
 
 // Start Express Server

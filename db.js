@@ -68,13 +68,15 @@ const CREATE_TABLES_SQL = `
 
   CREATE TABLE IF NOT EXISTS requests (
     id VARCHAR(100) PRIMARY KEY,
+    requester_username VARCHAR(100) NOT NULL,
     movie_name VARCHAR(255) NOT NULL,
     actor_name VARCHAR(255) NOT NULL,
     scene_name VARCHAR(255) NOT NULL,
     dialogue TEXT NOT NULL,
     description TEXT,
     request_date VARCHAR(50) NOT NULL,
-    status VARCHAR(50) DEFAULT 'Pending'
+    status VARCHAR(50) DEFAULT 'Pending',
+    fulfilled_video_id VARCHAR(100)
   );
 `;
 
@@ -94,6 +96,8 @@ async function initDb() {
     
     // Migration: ensure password_hash column exists
     await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255) DEFAULT \'\'');
+    await pool.query('ALTER TABLE requests ADD COLUMN IF NOT EXISTS requester_username VARCHAR(100) DEFAULT \'\'');
+    await pool.query('ALTER TABLE requests ADD COLUMN IF NOT EXISTS fulfilled_video_id VARCHAR(100)');
     console.log("✅ PostgreSQL schema tables initialized successfully.");
 
     // Delete any pre-existing dummy seed data if they exist in Postgres database
@@ -245,13 +249,15 @@ module.exports = {
       const res = await pool.query('SELECT * FROM requests ORDER BY request_date DESC');
       return res.rows.map(row => ({
         id: row.id,
+        requesterUsername: row.requester_username || "",
         movieName: row.movie_name,
         actorName: row.actor_name,
         sceneName: row.scene_name,
         dialogue: row.dialogue,
         description: row.description,
         requestDate: row.request_date,
-        status: row.status
+        status: row.status,
+        fulfilledVideoId: row.fulfilled_video_id || ""
       }));
     }
     return memoryStore.requests;
@@ -260,12 +266,56 @@ module.exports = {
   saveRequest: async (request) => {
     if (usePostgres) {
       await pool.query(
-        `INSERT INTO requests (id, movie_name, actor_name, scene_name, dialogue, description, request_date, status) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [request.id, request.movieName, request.actorName, request.sceneName, request.dialogue, request.description, request.requestDate, request.status]
+        `INSERT INTO requests (id, requester_username, movie_name, actor_name, scene_name, dialogue, description, request_date, status, fulfilled_video_id) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [request.id, request.requesterUsername, request.movieName, request.actorName, request.sceneName, request.dialogue, request.description, request.requestDate, request.status, request.fulfilledVideoId || null]
       );
     } else {
       memoryStore.requests.unshift(request);
+    }
+  },
+
+  updateRequestStatus: async (requestId, status, fulfilledVideoId) => {
+    if (usePostgres) {
+      await pool.query(
+        'UPDATE requests SET status = $1, fulfilled_video_id = COALESCE($2, fulfilled_video_id) WHERE id = $3',
+        [status, fulfilledVideoId || null, requestId]
+      );
+    } else {
+      const request = memoryStore.requests.find(r => r.id === requestId);
+      if (request) {
+        request.status = status;
+        if (fulfilledVideoId) request.fulfilledVideoId = fulfilledVideoId;
+      }
+    }
+  },
+
+  updateUsername: async (oldUsername, newUsername) => {
+    if (usePostgres) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('UPDATE users SET username = $1 WHERE username = $2', [newUsername, oldUsername]);
+        await client.query('UPDATE videos SET username = $1 WHERE username = $2', [newUsername, oldUsername]);
+        await client.query('UPDATE requests SET requester_username = $1 WHERE requester_username = $2', [newUsername, oldUsername]);
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    } else {
+      const user = memoryStore.users.find(u => u.username.toLowerCase() === oldUsername.toLowerCase());
+      if (user) user.username = newUsername;
+      memoryStore.videos.forEach(v => {
+        if (v.username.toLowerCase() === oldUsername.toLowerCase()) v.username = newUsername;
+      });
+      memoryStore.requests.forEach(r => {
+        if (r.requesterUsername && r.requesterUsername.toLowerCase() === oldUsername.toLowerCase()) {
+          r.requesterUsername = newUsername;
+        }
+      });
     }
   }
 };
