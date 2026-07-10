@@ -48,6 +48,7 @@ const CREATE_TABLES_SQL = `
     name VARCHAR(255) NOT NULL,
     email VARCHAR(255) NOT NULL,
     avatar_url TEXT,
+    password_hash VARCHAR(255) DEFAULT '',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -90,6 +91,9 @@ async function initDb() {
     
     // Auto-migrate tables
     await pool.query(CREATE_TABLES_SQL);
+    
+    // Migration: ensure password_hash column exists
+    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255) DEFAULT \'\'');
     console.log("✅ PostgreSQL schema tables initialized successfully.");
 
     // Delete any pre-existing dummy seed data if they exist in Postgres database
@@ -128,20 +132,45 @@ module.exports = {
         username: row.username,
         name: row.name,
         email: row.email,
-        avatarUrl: row.avatar_url
+        avatarUrl: row.avatar_url,
+        passwordHash: row.password_hash
       }));
     }
     return memoryStore.users;
   },
 
+  getUserByUsername: async (username) => {
+    if (usePostgres) {
+      const res = await pool.query('SELECT * FROM users WHERE LOWER(username) = LOWER($1)', [username]);
+      if (res.rows.length === 0) return null;
+      const row = res.rows[0];
+      return {
+        username: row.username,
+        name: row.name,
+        email: row.email,
+        avatarUrl: row.avatar_url,
+        passwordHash: row.password_hash
+      };
+    }
+    return memoryStore.users.find(u => u.username.toLowerCase() === username.toLowerCase()) || null;
+  },
+
   saveUser: async (user) => {
     if (usePostgres) {
       await pool.query(
-        'INSERT INTO users (username, name, email, avatar_url) VALUES ($1, $2, $3, $4) ON CONFLICT (username) DO NOTHING',
-        [user.username, user.name, user.email, user.avatarUrl]
+        `INSERT INTO users (username, name, email, avatar_url, password_hash) 
+         VALUES ($1, $2, $3, $4, $5) 
+         ON CONFLICT (username) 
+         DO UPDATE SET name = EXCLUDED.name, email = EXCLUDED.email, avatar_url = EXCLUDED.avatar_url, password_hash = EXCLUDED.password_hash`,
+        [user.username, user.name, user.email, user.avatarUrl, user.passwordHash || '']
       );
     } else {
-      memoryStore.users.push(user);
+      const idx = memoryStore.users.findIndex(u => u.username.toLowerCase() === user.username.toLowerCase());
+      if (idx !== -1) {
+        memoryStore.users[idx] = user;
+      } else {
+        memoryStore.users.push(user);
+      }
     }
   },
 
@@ -174,6 +203,40 @@ module.exports = {
       );
     } else {
       memoryStore.videos.unshift(video);
+    }
+  },
+
+  updateVideoLikes: async (videoId, incrementValue) => {
+    if (usePostgres) {
+      const res = await pool.query(
+        'UPDATE videos SET likes_count = GREATEST(0, likes_count + $1) WHERE id = $2 RETURNING likes_count',
+        [incrementValue, videoId]
+      );
+      return res.rows[0] ? res.rows[0].likes_count : 0;
+    } else {
+      const video = memoryStore.videos.find(v => v.id === videoId);
+      if (video) {
+        video.likesCount = Math.max(0, video.likesCount + incrementValue);
+        return video.likesCount;
+      }
+      return 0;
+    }
+  },
+
+  incrementVideoDownloads: async (videoId) => {
+    if (usePostgres) {
+      const res = await pool.query(
+        'UPDATE videos SET downloads_count = downloads_count + 1 WHERE id = $1 RETURNING downloads_count',
+        [videoId]
+      );
+      return res.rows[0] ? res.rows[0].downloads_count : 0;
+    } else {
+      const video = memoryStore.videos.find(v => v.id === videoId);
+      if (video) {
+        video.downloadsCount += 1;
+        return video.downloadsCount;
+      }
+      return 0;
     }
   },
 

@@ -7,6 +7,7 @@ const fs = require('fs');
 const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 require('dotenv').config();
+const bcrypt = require('bcryptjs');
 
 const db = require('./db');
 
@@ -104,33 +105,31 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', time: new Date() });
 });
 
-// Authentication: Login (Accepts any credentials dynamically)
+// Authentication: Login (Strict username and password verification)
 app.post('/v1/auth/login', async (req, res) => {
   const { username, password } = req.body;
-  if (!username) {
-    return res.status(400).json({ success: false, message: "Username is required", data: null });
+  if (!username || !password) {
+    return res.status(400).json({ success: false, message: "Username and Password are required", data: null });
   }
 
-  const users = await db.getUsers();
-  let user = users.find(u => u.username.toLowerCase() === username.toLowerCase());
+  const user = await db.getUserByUsername(username);
 
   if (!user) {
-    // If user does not exist, automatically register them!
-    user = {
-      username: username,
-      name: username.charAt(0).toUpperCase() + username.slice(1) + " (Guest)",
-      email: `${username.toLowerCase()}@templateverse.com`,
-      avatarUrl: `https://api.dicebear.com/7.x/bottts/svg?seed=${username}`
-    };
-    await db.saveUser(user);
+    return res.status(400).json({ success: false, message: "User does not exist. Please register first.", data: null });
+  }
+
+  // Verify password
+  const passwordMatch = await bcrypt.compare(password, user.passwordHash || "");
+  if (!passwordMatch) {
+    return res.status(400).json({ success: false, message: "Invalid username or password", data: null });
   }
 
   res.json({
     success: true,
     message: "Login successful",
     data: {
-      accessToken: `token_${username}_${Date.now()}`,
-      refreshToken: `refresh_${username}_${Date.now()}`,
+      accessToken: `token_${user.username}_${Date.now()}`,
+      refreshToken: `refresh_${user.username}_${Date.now()}`,
       username: user.username,
       name: user.name,
       email: user.email,
@@ -139,25 +138,30 @@ app.post('/v1/auth/login', async (req, res) => {
   });
 });
 
-// Authentication: Register (Accepts any credentials dynamically)
+// Authentication: Register (Enforces unique username and hashes password)
 app.post('/v1/auth/register', async (req, res) => {
   const { username, name, email, password } = req.body;
-  if (!username || !name || !email) {
+  if (!username || !name || !email || !password) {
     return res.status(400).json({ success: false, message: "Missing required fields", data: null });
   }
 
-  const users = await db.getUsers();
-  let user = users.find(u => u.username.toLowerCase() === username.toLowerCase() || u.email.toLowerCase() === email.toLowerCase());
-
-  if (!user) {
-    user = {
-      username: username,
-      name: name,
-      email: email,
-      avatarUrl: `https://api.dicebear.com/7.x/bottts/svg?seed=${username}`
-    };
-    await db.saveUser(user);
+  const existingUser = await db.getUserByUsername(username);
+  if (existingUser) {
+    return res.status(400).json({ success: false, message: "Username is already taken", data: null });
   }
+
+  // Hash password
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  const user = {
+    username: username,
+    name: name,
+    email: email,
+    passwordHash: passwordHash,
+    avatarUrl: `https://api.dicebear.com/7.x/bottts/svg?seed=${username}`
+  };
+  
+  await db.saveUser(user);
 
   res.json({
     success: true,
@@ -171,6 +175,37 @@ app.post('/v1/auth/register', async (req, res) => {
       avatarUrl: user.avatarUrl
     }
   });
+});
+
+// Video Likes Sync Endpoint
+app.post('/v1/videos/like', async (req, res) => {
+  const { videoId, isLiked } = req.body;
+  if (!videoId) {
+    return res.status(400).json({ success: false, message: "videoId is required" });
+  }
+  const incrementValue = isLiked ? 1 : -1;
+  try {
+    const updatedCount = await db.updateVideoLikes(videoId, incrementValue);
+    res.json({ success: true, updatedLikesCount: updatedCount });
+  } catch (err) {
+    console.error("Error updating likes:", err.message);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Video Downloads Sync Endpoint
+app.post('/v1/videos/download', async (req, res) => {
+  const { videoId } = req.body;
+  if (!videoId) {
+    return res.status(400).json({ success: false, message: "videoId is required" });
+  }
+  try {
+    const updatedCount = await db.incrementVideoDownloads(videoId);
+    res.json({ success: true, updatedDownloadsCount: updatedCount });
+  } catch (err) {
+    console.error("Error updating downloads:", err.message);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
 });
 
 // Get Video list (Supports search queries & filtering)
