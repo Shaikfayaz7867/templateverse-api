@@ -212,8 +212,8 @@ app.post('/v1/videos/download', async (req, res) => {
 
 // Get Video list (Supports search queries & filtering)
 app.get('/v1/videos', async (req, res) => {
-  const { category, filter, query } = req.query;
-  let videos = await db.getVideos();
+  const { category, filter, query, page, limit } = req.query;
+  let videos = await db.getVideos({ page, limit, category, query, filter });
 
   // Resolve dynamic asset URLs relative to current request's host/protocol and generate presigned URLs if needed
   videos = await Promise.all(videos.map(async (vid) => {
@@ -244,35 +244,6 @@ app.get('/v1/videos', async (req, res) => {
       thumbnailUrl: resolveUrl(vid.thumbnailUrl, req)
     };
   }));
-
-  // Filter by category
-  if (category && category.toLowerCase() !== 'all') {
-    videos = videos.filter(v => v.category.toLowerCase() === category.toLowerCase());
-  }
-
-  // Filter by search query
-  if (query) {
-    const q = query.toLowerCase();
-    videos = videos.filter(v => 
-      v.title.toLowerCase().includes(q) ||
-      v.description.toLowerCase().includes(q) ||
-      v.category.toLowerCase().includes(q) ||
-      (v.tags && v.tags.some(tag => tag.toLowerCase().includes(q)))
-    );
-  }
-
-  // Sort by filter
-  if (filter) {
-    if (filter === 'Trending') {
-      videos.sort((a, b) => b.likesCount - a.likesCount);
-    } else if (filter === 'Most Downloaded') {
-      videos.sort((a, b) => b.downloadsCount - a.downloadsCount);
-    } else if (filter === 'Newest') {
-      videos.sort((a, b) => new Date(b.uploadDate) - new Date(a.uploadDate));
-    } else if (filter === 'Oldest') {
-      videos.sort((a, b) => new Date(a.uploadDate) - new Date(b.uploadDate));
-    }
-  }
 
   res.json({
     success: true,
@@ -343,7 +314,7 @@ app.post('/v1/videos/upload', upload.single('videoFile'), async (req, res) => {
   await db.saveVideo(newVideo);
 
   if (requestId) {
-    await db.updateRequestStatus(requestId, 'Fulfilled', newVideo.id);
+    await db.updateRequestStatus(requestId, 'Pending Validation', newVideo.id);
   }
 
   res.json({
@@ -400,7 +371,37 @@ app.post('/v1/requests/create', async (req, res) => {
 
 // Retrieve requests history
 app.get('/v1/requests/history', async (req, res) => {
-  const requests = await db.getRequests();
+  let requests = await db.getRequests();
+  
+  requests = await Promise.all(requests.map(async (reqItem) => {
+    let finalVideoUrl = reqItem.fulfilledVideoUrl;
+    if (finalVideoUrl) {
+      if (finalVideoUrl.startsWith('r2://')) {
+        if (useR2 && s3Client) {
+          try {
+            const key = finalVideoUrl.replace('r2://', '');
+            const command = new GetObjectCommand({
+              Bucket: R2_BUCKET_NAME,
+              Key: key
+            });
+            finalVideoUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+          } catch (err) {
+            console.error("Error generating presigned URL:", err.message);
+            finalVideoUrl = "";
+          }
+        } else {
+          finalVideoUrl = "";
+        }
+      } else {
+        finalVideoUrl = resolveUrl(finalVideoUrl, req);
+      }
+    }
+    return {
+      ...reqItem,
+      fulfilledVideoUrl: finalVideoUrl
+    };
+  }));
+
   res.json({
     success: true,
     message: "Fetched request history",
@@ -408,10 +409,77 @@ app.get('/v1/requests/history', async (req, res) => {
   });
 });
 
-// Confirm request is complete/fulfilled
+// Approve request (marked as Completed)
+app.put('/v1/requests/:id/approve', async (req, res) => {
+  const { id } = req.params;
+  await db.updateRequestStatus(id, 'Completed', null);
+  res.json({
+    success: true,
+    message: "Request approved successfully"
+  });
+});
+
+// Reject request (deletes video from R2/disk and DB, resets request to Pending)
+app.put('/v1/requests/:id/reject', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const requests = await db.getRequests();
+    const request = requests.find(r => r.id === id);
+    if (request && request.fulfilledVideoId) {
+      const videoId = request.fulfilledVideoId;
+      const videos = await db.getVideos();
+      const video = videos.find(v => v.id === videoId);
+      if (video) {
+        const videoUrl = video.videoUrl;
+        
+        // Delete from R2 if active
+        if (useR2 && s3Client && videoUrl.startsWith('r2://')) {
+          try {
+            const { DeleteObjectCommand } = require('@aws-sdk/client-s3');
+            const key = videoUrl.replace('r2://', '');
+            const deleteCommand = new DeleteObjectCommand({
+              Bucket: R2_BUCKET_NAME,
+              Key: key
+            });
+            await s3Client.send(deleteCommand);
+            console.log(`🧹 Deleted R2 object: ${key}`);
+          } catch (e) {
+            console.error("Failed to delete R2 video:", e.message);
+          }
+        } else if (videoUrl.includes('/uploads/')) {
+          // Delete local file
+          try {
+            const filename = videoUrl.split('/uploads/')[1];
+            const filePath = path.join(UPLOADS_DIR, filename);
+            if (fs.existsSync(filePath)) {
+              fs.unlinkSync(filePath);
+              console.log(`🧹 Deleted local file: ${filePath}`);
+            }
+          } catch (e) {
+            console.error("Failed to delete local video file:", e.message);
+          }
+        }
+        
+        // Delete from DB
+        await db.deleteVideo(videoId);
+      }
+    }
+  } catch (err) {
+    console.error("Error in rejection file cleanup:", err.message);
+  }
+
+  // Set request status back to Pending and clear fulfilledVideoId
+  await db.updateRequestStatus(id, 'Pending', '');
+  res.json({
+    success: true,
+    message: "Request rejected and video deleted"
+  });
+});
+
+// Confirm request is complete/fulfilled (legacy fallback)
 app.put('/v1/requests/:id/confirm', async (req, res) => {
   const { id } = req.params;
-  await db.updateRequestStatus(id, 'Fulfilled', null);
+  await db.updateRequestStatus(id, 'Completed', null);
   res.json({
     success: true,
     message: "Request marked as fulfilled successfully"

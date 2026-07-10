@@ -178,9 +178,44 @@ module.exports = {
     }
   },
 
-  getVideos: async () => {
+  getVideos: async ({ page = 1, limit = 10, category = 'All', query = '', filter = 'Trending' } = {}) => {
     if (usePostgres) {
-      const res = await pool.query('SELECT * FROM videos');
+      let q = `
+        SELECT v.* FROM videos v
+        LEFT JOIN requests r ON r.fulfilled_video_id = v.id
+        WHERE (r.id IS NULL OR r.status = 'Completed' OR r.status = 'Fulfilled')
+      `;
+      const values = [];
+      let paramCount = 1;
+
+      if (category && category.toLowerCase() !== 'all') {
+        q += ` AND LOWER(v.category) = $${paramCount}`;
+        values.push(category.toLowerCase());
+        paramCount++;
+      }
+
+      if (query) {
+        q += ` AND (LOWER(v.title) LIKE $${paramCount} OR LOWER(v.description) LIKE $${paramCount} OR LOWER(v.category) LIKE $${paramCount})`;
+        values.push('%' + query.toLowerCase() + '%');
+        paramCount++;
+      }
+
+      if (filter === 'Trending') {
+        q += ` ORDER BY v.likes_count DESC`;
+      } else if (filter === 'Most Downloaded') {
+        q += ` ORDER BY v.downloads_count DESC`;
+      } else if (filter === 'Newest') {
+        q += ` ORDER BY v.upload_date DESC`;
+      } else if (filter === 'Oldest') {
+        q += ` ORDER BY v.upload_date ASC`;
+      } else {
+        q += ` ORDER BY v.upload_date DESC`;
+      }
+
+      q += ` LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
+      values.push(parseInt(limit, 10), (parseInt(page, 10) - 1) * parseInt(limit, 10));
+
+      const res = await pool.query(q, values);
       return res.rows.map(row => ({
         id: row.id,
         title: row.title,
@@ -195,7 +230,41 @@ module.exports = {
         downloadsCount: row.downloads_count
       }));
     }
-    return memoryStore.videos;
+    
+    // In-memory fallback with sorting and pagination
+    let result = memoryStore.videos.filter(v => {
+      const r = memoryStore.requests.find(req => req.fulfilledVideoId === v.id);
+      return !r || r.status === 'Completed' || r.status === 'Fulfilled';
+    });
+
+    if (category && category.toLowerCase() !== 'all') {
+      result = result.filter(v => v.category.toLowerCase() === category.toLowerCase());
+    }
+
+    if (query) {
+      const qLower = query.toLowerCase();
+      result = result.filter(v => 
+        v.title.toLowerCase().includes(qLower) ||
+        v.description.toLowerCase().includes(qLower) ||
+        v.category.toLowerCase().includes(qLower) ||
+        (v.tags && v.tags.some(t => t.toLowerCase().includes(qLower)))
+      );
+    }
+
+    if (filter === 'Trending') {
+      result.sort((a, b) => b.likesCount - a.likesCount);
+    } else if (filter === 'Most Downloaded') {
+      result.sort((a, b) => b.downloadsCount - a.downloadsCount);
+    } else if (filter === 'Newest') {
+      result.sort((a, b) => new Date(b.uploadDate) - new Date(a.uploadDate));
+    } else if (filter === 'Oldest') {
+      result.sort((a, b) => new Date(a.uploadDate) - new Date(b.uploadDate));
+    }
+
+    const p = parseInt(page, 10) || 1;
+    const l = parseInt(limit, 10) || 10;
+    const offset = (p - 1) * l;
+    return result.slice(offset, offset + l);
   },
 
   saveVideo: async (video) => {
@@ -246,7 +315,12 @@ module.exports = {
 
   getRequests: async () => {
     if (usePostgres) {
-      const res = await pool.query('SELECT * FROM requests ORDER BY request_date DESC');
+      const res = await pool.query(`
+        SELECT r.*, v.video_url as fulfilled_video_url, v.username as fulfilled_username
+        FROM requests r
+        LEFT JOIN videos v ON r.fulfilled_video_id = v.id
+        ORDER BY r.request_date DESC
+      `);
       return res.rows.map(row => ({
         id: row.id,
         requesterUsername: row.requester_username || "",
@@ -257,10 +331,28 @@ module.exports = {
         description: row.description,
         requestDate: row.request_date,
         status: row.status,
-        fulfilledVideoId: row.fulfilled_video_id || ""
+        fulfilledVideoId: row.fulfilled_video_id || "",
+        fulfilledVideoUrl: row.fulfilled_video_url || "",
+        fulfilledUsername: row.fulfilled_username || ""
       }));
     }
-    return memoryStore.requests;
+    return memoryStore.requests.map(r => {
+      const v = memoryStore.videos.find(vid => vid.id === r.fulfilledVideoId);
+      return {
+        id: r.id,
+        requesterUsername: r.requesterUsername || "",
+        movieName: r.movieName,
+        actorName: r.actorName,
+        sceneName: r.sceneName,
+        dialogue: r.dialogue,
+        description: r.description,
+        requestDate: r.requestDate,
+        status: r.status,
+        fulfilledVideoId: r.fulfilledVideoId || "",
+        fulfilledVideoUrl: v ? v.videoUrl : "",
+        fulfilledUsername: v ? v.username : ""
+      };
+    });
   },
 
   saveRequest: async (request) => {
@@ -278,15 +370,23 @@ module.exports = {
   updateRequestStatus: async (requestId, status, fulfilledVideoId) => {
     if (usePostgres) {
       await pool.query(
-        'UPDATE requests SET status = $1, fulfilled_video_id = COALESCE($2, fulfilled_video_id) WHERE id = $3',
-        [status, fulfilledVideoId || null, requestId]
+        'UPDATE requests SET status = $1, fulfilled_video_id = $2 WHERE id = $3',
+        [status, (fulfilledVideoId === '' || fulfilledVideoId === null) ? null : fulfilledVideoId, requestId]
       );
     } else {
       const request = memoryStore.requests.find(r => r.id === requestId);
       if (request) {
         request.status = status;
-        if (fulfilledVideoId) request.fulfilledVideoId = fulfilledVideoId;
+        request.fulfilledVideoId = (fulfilledVideoId === '' || fulfilledVideoId === null) ? '' : fulfilledVideoId;
       }
+    }
+  },
+
+  deleteVideo: async (videoId) => {
+    if (usePostgres) {
+      await pool.query('DELETE FROM videos WHERE id = $1', [videoId]);
+    } else {
+      memoryStore.videos = memoryStore.videos.filter(v => v.id !== videoId);
     }
   },
 
