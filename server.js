@@ -109,19 +109,19 @@ app.get('/health', (req, res) => {
 app.post('/v1/auth/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) {
-    return res.status(400).json({ success: false, message: "Username and Password are required", data: null });
+    return res.json({ success: false, message: "Username and Password are required", data: null });
   }
 
   const user = await db.getUserByUsername(username);
 
   if (!user) {
-    return res.status(400).json({ success: false, message: "User does not exist. Please register first.", data: null });
+    return res.json({ success: false, message: "UserName DoesNot exist. Please register first.", data: null });
   }
 
   // Verify password
   const passwordMatch = await bcrypt.compare(password, user.passwordHash || "");
   if (!passwordMatch) {
-    return res.status(400).json({ success: false, message: "Invalid username or password", data: null });
+    return res.json({ success: false, message: "Password is wrong", data: null });
   }
 
   res.json({
@@ -142,14 +142,14 @@ app.post('/v1/auth/login', async (req, res) => {
 app.post('/v1/auth/register', async (req, res) => {
   const { username, name, email, password } = req.body;
   if (!username || !name || !password) {
-    return res.status(400).json({ success: false, message: "Missing required fields", data: null });
+    return res.json({ success: false, message: "Missing required fields", data: null });
   }
 
   const userEmail = email || "";
 
   const existingUser = await db.getUserByUsername(username);
   if (existingUser) {
-    return res.status(400).json({ success: false, message: "Username is already taken", data: null });
+    return res.json({ success: false, message: "Username is already taken", data: null });
   }
 
   // Hash password
@@ -343,7 +343,7 @@ app.post('/v1/videos/upload', upload.single('videoFile'), async (req, res) => {
   await db.saveVideo(newVideo);
 
   if (requestId) {
-    await db.updateRequestStatus(requestId, 'Uploaded', newVideo.id);
+    await db.updateRequestStatus(requestId, 'Fulfilled', newVideo.id);
   }
 
   res.json({
@@ -362,7 +362,7 @@ app.post('/v1/requests/create', async (req, res) => {
   const { id, requesterUsername, movieName, actorName, sceneName, dialogue, description, requestDate, status } = req.body;
 
   if (!requesterUsername || !movieName || !actorName || !sceneName || !dialogue) {
-    return res.status(400).json({ success: false, message: "Missing mandatory video request fields", data: null });
+    return res.json({ success: false, message: "Missing mandatory video request fields", data: null });
   }
 
   // Format requestDate if not supplied
@@ -420,18 +420,28 @@ app.put('/v1/requests/:id/confirm', async (req, res) => {
 
 // Modify user's username
 app.put('/v1/users/update-username', async (req, res) => {
-  const { oldUsername, newUsername } = req.body;
-  if (!oldUsername || !newUsername) {
-    return res.status(400).json({ success: false, message: "Old and new usernames are required" });
+  const { oldUsername, newUsername, password } = req.body;
+  if (!oldUsername || !newUsername || !password) {
+    return res.json({ success: false, message: "Old username, new username, and password are required" });
   }
   if (oldUsername.toLowerCase() === newUsername.toLowerCase()) {
-    return res.status(400).json({ success: false, message: "New username must be different from old username" });
+    return res.json({ success: false, message: "New username must be different from old username" });
+  }
+
+  // Get user and verify password
+  const user = await db.getUserByUsername(oldUsername);
+  if (!user) {
+    return res.json({ success: false, message: "User not found" });
+  }
+  const passwordMatch = await bcrypt.compare(password, user.passwordHash || "");
+  if (!passwordMatch) {
+    return res.json({ success: false, message: "Incorrect password" });
   }
 
   // Check if username is already taken
   const existingUser = await db.getUserByUsername(newUsername);
   if (existingUser) {
-    return res.status(400).json({ success: false, message: "Username is already taken" });
+    return res.json({ success: false, message: "Username is already taken" });
   }
 
   try {
@@ -441,7 +451,7 @@ app.put('/v1/users/update-username', async (req, res) => {
       message: "Username modified successfully"
     });
   } catch (err) {
-    res.status(500).json({
+    res.json({
       success: false,
       message: "Failed to modify username: " + err.message
     });
